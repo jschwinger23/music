@@ -3,3 +3,4 @@
 *.mp3
 *.swp
 .python-version
+.DS_Store
