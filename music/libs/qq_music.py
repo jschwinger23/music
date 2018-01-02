@@ -1,6 +1,7 @@
+import re
 import json
 from pathlib import Path
-from opertor import itemgetter
+from operator import itemgetter
 from typing import Optional
 
 import requests
@@ -16,12 +17,12 @@ class Resource:
 
     @classmethod
     def from_meta(cls, meta: dict):
-        resp = requests.get(cls.URL_FORMATTER(meta=meta))
+        resp = requests.get(cls.URL_FORMATTER(meta))
         resp.raise_for_status()
-        details = resp.json()
+        details = json.loads(re.search(r'{.+}', resp.content.decode()).group())
         return cls(meta, details)
 
-    def __init__(self, meta: dict, details: Optional[dict]=None):
+    def __init__(self, meta: dict, details: Optional[dict] = None):
         self.meta = meta
         self.details = details
 
@@ -37,29 +38,37 @@ class Resource:
 
 
 class AlbumCollection(Resource):
+    URL_FORMATTER = 'https://c.y.qq.com/fav/fcgi-bin/fcg_get_profile_order_asset.fcg?loginUin=0&hostUin=0&format=jsonp&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq&needNewCode=0&ct=20&cid={cid}&userid={uid}&reqtype=2&ein=1000'.format_map
+
     def __iter__(self):
-        for album_meta in self.details:
+        for album_meta in self.details['data']['albumlist']:
             album = Album.from_meta(album_meta)
             yield album
 
 
 class Album(Resource):
-    URL_FORMATTER = ''.format
+    URL_FORMATTER = 'https://c.y.qq.com/v8/fcg-bin/fcg_v8_album_info_cp.fcg?loginUin=0&hostUin=0&format=jsonp&inCharset=utf8&outCharset=utf-8&notice=0&platform=yqq&needNewCode=0&albummid={albummid}&jsonpCallback=albuminfoCallback'.format_map
 
-    def __iter__(self):
-        for song_meta in self.details:
-            song = Song.from_meta(song_meta)
-            yield song
+    def search(self, artist, title):
+        for song in self.details['data']['list']:
+            if song['songname'] == title and artist in {
+                    singer['name']
+                    for singer in song['singer']
+            }:
+                return song
 
-
-class Song:
-    URL_FORMATTER = ''.format
+    @property
+    def name(self):
+        return self.meta['albumname']
 
 
 class QQMusicCache:
     def __init__(self, cid, uid):
-        self.album_collection = AlbumCollection.from_meta({'cid': cid, 'uid': uid})
-        self.root = Path(f'~/.qq_music/{uid}')
+        self.album_collection = AlbumCollection.from_meta({
+            'cid': cid,
+            'uid': uid
+        })
+        self.root = Path.home() / f'.qq_music/{uid}'
 
     def update_all(self):
         for album in self.album_collection:
@@ -67,33 +76,22 @@ class QQMusicCache:
                 break
 
             self.set_album(album)
-            for song in album:
-                self.set_song(album, song)
 
     def set_album(self, album: Album):
         album_dir = self.root / album.name
-        album_dir.mkdir()
+        album_dir.mkdir(parents=True)
 
         album_meta_filename = album_dir / 'meta.json'
         with album_meta_filename.open('w+') as f:
-            json.dump(f, album.to_json())
-
-    def set_song(self, album: Album, song: Song):
-        song_dir = self.root / album.name / song.name
-        song_dir.mkdir()
-
-        song_meta_filename = song_dir / 'meta.json'
-        with song_meta_filename.open('w+') as f:
-            json.dump(f, song.to_json())
+            json.dump(album.to_json(), f)
 
     def search(self, artist: str, title: str):
-        for album_dir in self.root.walk():
-            for song_dir in album_dir.walk():
-                song_meta_filename = song_dir / 'meta.json'
-                with song_meta_filename.open() as f:
-                    song = Song.from_json(json.load(f))
-                    if song.match(artist, title):
-                        return song
+        for album_dir in self.root.glob('*'):
+            album_meta_filename = album_dir / 'meta.json'
+            album = Album.from_file(album_meta_filename)
+            song = album.search(artist, title)
+            if song:
+                return song
 
     def __contains__(self, album: Album):
         album_dir = self.root / album.name
